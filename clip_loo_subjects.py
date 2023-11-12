@@ -768,7 +768,7 @@ for subj_id in range(len(subjects_samples)):
         transformer_layers
     ).to(device)
 
-    train_clip(clip_model, train_text, train_images, batch_size=64, lr=1e-4, num_epochs=100, debug=True)
+    train_clip(clip_model, train_text, train_images, batch_size=64, lr=1e-4, num_epochs=50, debug=True)
 
     train_loss, train_image_acc, train_text_acc = assess_accuracy(train_text, train_images)
     print("\tTrain Loss:", train_loss, ", Image Accuracy:", train_image_acc, ", Text Accuracy:", train_text_acc)
