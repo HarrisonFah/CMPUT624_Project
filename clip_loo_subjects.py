@@ -14,7 +14,9 @@ import nibabel as nib
 from pathlib import Path
 from gensim.models import Word2Vec
 import re
+import gc
 
+# device = 'cpu'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(device)
 
@@ -30,30 +32,13 @@ for subj_id in range(8):
     assert(fmri.ndim) == 4, f"Imported fmri_scan for subject {subj_id} is not 4 dimensional"
     subjects_fmri.append(fmri)
 
-feature_matrix = np.zeros((5176,195)) #stores the feature vectors as a row for each word
-feature_names = [] #stores the names of all features in order
-feature_types = {} #stores the types of features and all the names of the features for each type
-features = sio.loadmat(fMRI_folder / 'story_features.mat')
-feature_count = 0
-for feature_type in features['features'][0]:
-    feature_types[feature_type[0][0]] = []
-    if isinstance(feature_type[1][0], str):
-        feature_types[feature_type[0][0]].append(feature_type[1][0])
-        feature_names.append(feature_type[1][0])
-    else:
-        for feature in feature_type[1][0]:
-            feature_types[feature_type[0][0]].append(feature[0])
-            feature_names.append(feature[0])
-    feature_matrix[:, feature_count:feature_count+feature_type[2].shape[1]] = feature_type[2] #adds the (5176xN) feature values to the feature matrix for the current feature group
-    feature_count += feature_type[2].shape[1]
-
 words_info = [] #stores tuples of (word, time, features) sorted by time appeared
 mat_file = fMRI_folder / 'subject_1.mat' #only looks at the first subject file, somewhere it said all the timings were the same so this should be safe
 mat_contents = sio.loadmat(mat_file)
 for count, row in enumerate(mat_contents['words'][0]):
     word_value = row[0][0][0][0]
     time = row[1][0][0]
-    word_tuple = (word_value, time, feature_matrix[count,:])
+    word_tuple = (word_value, time)
     words_info.append(word_tuple)
 
 subjects_samples = [[] for i in range(NUM_SUBJS)] #stores lists of all the samples for each subject
@@ -75,7 +60,7 @@ while word_count < len(words_info) - 24:
         continue
     fmri_time = start_time + 2 #effect of reading words is assumed to start 2 seconds after and end 8 seconds after
     fmri_index = fmri_time//2 #since a scan happens every two seconds, the index is the time divided by 2
-    if not isinstance(fmri_index, np.int32):
+    if not np.issubdtype(fmri_index, np.integer):
         #if the first word is not aligned with the fmri scan (i.e. its not the first word in a TR)
         word_count += 1
         continue
@@ -550,16 +535,22 @@ class CLIP(nn.Module):
         return x
 
     def forward(self, image, text):
+        #print("encoding images")
         image_features = self.encode_image(image)
+        #print("encoding text")
         text_features = self.encode_text(text)
 
         # normalized features
+        #print("normalizing images")
         image_features = image_features / image_features.norm(dim=1, keepdim=True)
+        #print("normalizing text")
         text_features = text_features / text_features.norm(dim=1, keepdim=True)
 
         # cosine similarity as logits
         logit_scale = self.logit_scale.exp()
+        #print("getting logits_per_image")
         logits_per_image = logit_scale * image_features @ text_features.t()
+        #print("getting logits_per_text")
         logits_per_text = logits_per_image.t()
 
         # shape = [global_batch_size, global_batch_size]
@@ -644,23 +635,49 @@ def unison_shuffled_copies(a, b):
 #trains the clip model from scratch
 def train_clip(model, text_samples, image_samples, batch_size=10, num_epochs=100, lr=1e-3, debug=False):
     print("Training...")
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=0.2)
-    loss_fn = nn.CrossEntropyLoss()
     for epoch in range(num_epochs):
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=0.2)
+        loss_fn = nn.CrossEntropyLoss()
+        model.zero_grad(set_to_none=True)
         epoch_loss = 0
         image_epoch_correct = 0
         text_epoch_correct = 0
         epoch_total = 0
-        text_samples, image_samples = unison_shuffled_copies(text_samples, image_samples)
-        for batch in range(math.floor(image_samples.shape[0]/batch_size)):
+        #print("Shuffling copies")
+        #p = np.random.permutation(len(a))
+        # print("Before memory summary:")
+        # print(torch.cuda.memory_summary(device=None, abbreviated=False))
+        # if device == "cuda":
+        #     print("Emptying cache...")
+        #     torch.cuda.empty_cache()
+        #     gc.collect()
+        # print("Before after summary:")
+        # print(torch.cuda.memory_summary(device=None, abbreviated=False))
+        # for obj in gc.get_objects():
+        #     try:
+        #         if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
+        #             print(type(obj), obj.size())
+        #     except:
+        #         pass
+        # for i in range(10):
+        #     print("i:",i)
+        p = torch.randperm(len(text_samples))
+        epoch_text_samples, epoch_image_samples = (text_samples.cpu())[p].to(device), (image_samples.cpu())[p].to(device)
+            
+        #print("Shuffled copies")
+        for batch in range(math.floor(epoch_image_samples.shape[0]/batch_size)):
             optimizer.zero_grad()
             
             #gets embeddings for text and image batches
             start_idx = batch*batch_size
             end_idx = (batch+1)*batch_size
-            text_batch, image_batch = text_samples[start_idx:end_idx], image_samples[start_idx:end_idx]
+            #print("Indexing samples")
+            text_batch, image_batch = epoch_text_samples[start_idx:end_idx], epoch_image_samples[start_idx:end_idx]
+            #print("Indexed samples")
             
+            #print("Calling model")
             logits_per_image, logits_per_text = model(torch.unsqueeze(image_batch, dim=1), text_batch)
+            #print("Called model")
             
             #symmetric loss function
             labels = torch.arange(batch_size).to(device)
@@ -668,7 +685,7 @@ def train_clip(model, text_samples, image_samples, batch_size=10, num_epochs=100
             loss_image = loss_fn(logits_per_image, labels)
             loss = (loss_text + loss_image)/2
             loss.backward()
-            epoch_loss += loss.item()
+            epoch_loss += loss.detach().item()
             optimizer.step()
             
             #compute accuracy
@@ -681,9 +698,40 @@ def train_clip(model, text_samples, image_samples, batch_size=10, num_epochs=100
             image_epoch_correct += total_image_correct
             text_epoch_correct += total_text_correct
             epoch_total += batch_size
-            print("\tBatch:", batch, "/", math.floor(image_samples.shape[0]/batch_size), ", Loss:", loss.item(), ", Image Accuracy:", total_image_correct/batch_size , ", Text Accuracy:", total_text_correct/batch_size)
+            if debug:
+                print("\t\tBatch:", batch, "/", math.floor(epoch_image_samples.shape[0]/batch_size), ", Loss:", loss.item(), ", Image Accuracy:", total_image_correct/batch_size , ", Text Accuracy:", total_text_correct/batch_size)
+            del logits_per_image
+            del logits_per_text
+            del text_batch
+            del image_batch
+            if device == "cuda":
+                torch.cuda.empty_cache()
+            gc.collect()
         if debug:
-            print("Epoch:", epoch, "Training Loss:", epoch_loss, "Training Image Accuracy:", image_epoch_correct/epoch_total, "Training Text Accuracy:", text_epoch_correct/epoch_total)
+            print("\tEpoch:", epoch, "Training Loss:", epoch_loss, "Training Image Accuracy:", image_epoch_correct/epoch_total, "Training Text Accuracy:", text_epoch_correct/epoch_total)
+        print("Deleting temp text and image samples...")
+        del epoch_text_samples
+        del epoch_image_samples
+        if device == "cuda":
+            torch.cuda.empty_cache()
+        gc.collect()
+
+def split_subject_samples(subjects_samples, min_val=None, max_val=None, num_tokens=24):
+    images = torch.zeros([len(subjects_samples[0])] + list(subjects_samples[0][0][0].shape))
+    text = torch.zeros((len(subjects_samples[0]), num_tokens), dtype=int)
+    for idx in range(len(subjects_samples[0])):
+        for subj_id, samples in enumerate(subjects_samples):
+            if subj_id == 0:
+                avg_fmri = samples[idx][0]
+            else:
+                avg_fmri += samples[idx][0]
+        images[idx] = torch.tensor(avg_fmri/len(subjects_samples[0]))
+        text[idx] = tokenize([" ".join(subjects_samples[0][idx][1])], context_length=num_tokens)
+    if min_val is None:
+        min_val = images.min()
+        max_val = images.max()
+    images = (images - min_val)/(max_val - min_val)
+    return images.to(device), text.to(device), min_val, max_val
 
 def split_samples(samples, min_val=None, max_val=None, num_tokens=24):
     images = torch.zeros([len(samples)] + list(samples[0][0].shape))
@@ -697,7 +745,7 @@ def split_samples(samples, min_val=None, max_val=None, num_tokens=24):
     images = (images - min_val)/(max_val - min_val)
     return images.to(device), text.to(device), min_val, max_val
 
-def assess_accuracy(text, images, batch_size=64):
+def assess_accuracy(model, text_samples, image_samples, batch_size=64):
     total_samples = 0
     total_image_correct = 0
     total_text_correct = 0
@@ -705,20 +753,25 @@ def assess_accuracy(text, images, batch_size=64):
 
     loss_fn = nn.CrossEntropyLoss()
 
-    text_samples, image_samples = unison_shuffled_copies(text, images)
-    for batch in range(math.floor(image_samples.shape[0]/batch_size)):
+    #text_samples, image_samples = unison_shuffled_copies(text, images)
+    p = torch.randperm(len(text_samples))
+    temp_text_samples, temp_image_samples = text_samples[p], image_samples[p]
+
+    for batch in range(math.floor(temp_image_samples.shape[0]/batch_size)):
+
+        print("batch:",batch)
                 
         #gets embeddings for text and image batches
         start_idx = batch*batch_size
         end_idx = (batch+1)*batch_size
-        text_batch, image_batch = text_samples[start_idx:end_idx], image_samples[start_idx:end_idx]
+        text_batch, image_batch = temp_text_samples[start_idx:end_idx], temp_image_samples[start_idx:end_idx]
 
-        logits_per_image, logits_per_text = clip_model(torch.unsqueeze(image_batch, dim=1), text_batch)
+        logits_per_image, logits_per_text = model(torch.unsqueeze(image_batch, dim=1), text_batch)
 
         #symmetric loss function
         labels = torch.arange(batch_size).to(device)
-        loss_text = loss_fn(logits_per_text, labels)
-        loss_image = loss_fn(logits_per_image, labels)
+        loss_text = loss_fn(logits_per_text, labels).detach()
+        loss_image = loss_fn(logits_per_image, labels).detach()
         loss = (loss_text + loss_image)/2
         total_loss += loss.item()
         
@@ -727,12 +780,24 @@ def assess_accuracy(text, images, batch_size=64):
         text_winners = torch.argmax(logits_per_text, dim=0)
         image_corrects = (image_winners == labels)
         text_corrects = (text_winners == labels)
-        image_correct_num = image_corrects.sum().float().item()
-        text_correct_num = text_corrects.sum().float().item()
+        image_correct_num = image_corrects.sum().float().detach().item()
+        text_correct_num = text_corrects.sum().float().detach().item()
         total_image_correct += image_correct_num
         total_text_correct += text_correct_num
         total_samples += batch_size
-        
+
+        del logits_per_image
+        del logits_per_text
+        del text_batch
+        del image_batch
+        if device == "cuda":
+            torch.cuda.empty_cache()
+        gc.collect()
+    del temp_text_samples
+    del temp_image_samples
+    if device == "cuda":
+        torch.cuda.empty_cache()
+    gc.collect()
     return total_loss, total_image_correct/total_samples, total_text_correct/total_samples
 
 for subj_id in range(len(subjects_samples)):
@@ -743,18 +808,25 @@ for subj_id in range(len(subjects_samples)):
             flattened += subjects_samples[i]
 
     #use all subjects except one for training
-    train_samples = flattened[:64] #remove the [:64] after determining it works on compute canada
-    train_images, train_text, min_val, max_val = split_samples(train_samples)
+    #train_samples = flattened #remove the [:64] after determining it works on compute canada
+    temp_subjects_samples = subjects_samples.copy()
+    del temp_subjects_samples[subj_id]
+    train_samples = temp_subjects_samples
+    train_images, train_text, min_val, max_val = split_subject_samples(train_samples)
     print("Train:")
     print(train_text.shape)
     print(train_images.shape)
 
     #use last subject for testing
-    test_samples = subjects_samples[subj_id][:64]
+    test_samples = subjects_samples[subj_id]
     test_images, test_text, _, _ = split_samples(test_samples, min_val, max_val)
     print("Test:")
     print(test_text.shape)
     print(test_images.shape)
+
+    #for alpha in [1e-4, 1e-5, 1e-6]:
+
+        # print("Alpha:",alpha)
 
     clip_model = CLIP(
         512, #embed dim
@@ -768,13 +840,23 @@ for subj_id in range(len(subjects_samples)):
         transformer_layers
     ).to(device)
 
-    train_clip(clip_model, train_text, train_images, batch_size=64, lr=1e-4, num_epochs=50, debug=True)
+    train_clip(clip_model, train_text, train_images, batch_size=32, lr=1e-5, num_epochs=100, debug=True)
 
-    train_loss, train_image_acc, train_text_acc = assess_accuracy(train_text, train_images)
-    print("\tTrain Loss:", train_loss, ", Image Accuracy:", train_image_acc, ", Text Accuracy:", train_text_acc)
+    train_loss, train_image_acc, train_text_acc = assess_accuracy(clip_model, train_text, train_images, batch_size=32)
+    print("Train Loss:", train_loss, ", Image Accuracy:", train_image_acc, ", Text Accuracy:", train_text_acc)
 
-    test_loss, test_image_acc, test_text_acc = assess_accuracy(test_text, test_images)
-    print("\tTest Loss:", test_loss, ", Image Accuracy:", test_image_acc, ", Text Accuracy:", test_text_acc)
+    test_loss, test_image_acc, test_text_acc = assess_accuracy(clip_model, test_text, test_images, batch_size=32)
+    print("Test Loss:", test_loss, ", Image Accuracy:", test_image_acc, ", Text Accuracy:", test_text_acc)
 
     torch.save(clip_model.state_dict(), "./saved_clip_model_minus_subj_" + str(subj_id))
+
+    del train_images
+    del train_text
+    del test_images
+    del test_text
+    if device == "cuda":
+        torch.cuda.empty_cache()
+    gc.collect()
+
+    break
 
