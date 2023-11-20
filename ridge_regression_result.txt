@@ -1,0 +1,63 @@
+Obtaining aligned fMRI scan for context length: 4---------------------------------------------
+---------Obtaining clip and fMRI embedding for subject 0-----------------
+Subject: 0 
+ Context Length: 4 
+ Average Accuracy: 41.50%
+
+
+---------Obtaining clip and fMRI embedding for subject 1-----------------
+Subject: 1 
+ Context Length: 4 
+ Average Accuracy: 46.56%
+
+
+Obtaining aligned fMRI scan for context length: 8---------------------------------------------
+---------Obtaining clip and fMRI embedding for subject 0-----------------
+Subject: 0 
+ Context Length: 8 
+ Average Accuracy: 44.48%
+
+
+---------Obtaining clip and fMRI embedding for subject 1-----------------
+Subject: 1 
+ Context Length: 8 
+ Average Accuracy: 52.83%
+
+
+Obtaining aligned fMRI scan for context length: 12---------------------------------------------
+---------Obtaining clip and fMRI embedding for subject 0-----------------
+Subject: 0 
+ Context Length: 12 
+ Average Accuracy: 33.79%
+
+
+---------Obtaining clip and fMRI embedding for subject 1-----------------
+Subject: 1 
+ Context Length: 12 
+ Average Accuracy: 48.48%
+
+
+Obtaining aligned fMRI scan for context length: 16---------------------------------------------
+---------Obtaining clip and fMRI embedding for subject 0-----------------
+Subject: 0 
+ Context Length: 16 
+ Average Accuracy: 39.84%
+
+
+---------Obtaining clip and fMRI embedding for subject 1-----------------
+Subject: 1 
+ Context Length: 16 
+ Average Accuracy: 52.18%
+
+
+Obtaining aligned fMRI scan for context length: 20---------------------------------------------
+---------Obtaining clip and fMRI embedding for subject 0-----------------
+Subject: 0 
+ Context Length: 20 
+ Average Accuracy: 35.56%
+
+
+---------Obtaining clip and fMRI embedding for subject 1-----------------
+Subject: 1 
+ Context Length: 20 
+ Average Accuracy: 31.38%
