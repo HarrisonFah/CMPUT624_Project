@@ -49,7 +49,7 @@ for count, row in enumerate(mat_contents['words'][0]):
 
 subjects_samples = [[] for i in range(NUM_SUBJS)] #stores lists of all the samples for each subject
 window = signal.windows.gaussian(16, std=1) #gaussian window for the 4 fMRI scans
-num_words = 8
+num_words = 4
 word_count = 0
 while word_count < len(words_info) - 24:
     #gets the 4 input words, and the 4 consecutive words while verifying they were read in sequence
@@ -96,16 +96,17 @@ while word_count < len(words_info) - 24:
             if i == 0:
                 summed_weighted_scans = word_scan
             else:
-                summed_weighted_scans += word_scan
+                summed_weighted_scans = np.concatenate((summed_weighted_scans, word_scan))
+                #summed_weighted_scans += word_scan
         if break_found:
             break
         subjects_samples[count].append((summed_weighted_scans/num_words, scan_words))
     if break_found:
         word_count += 1
         continue 
-    # print("Created sample:")
-    # print("\tScan time:", str(start_time))
-    # print("\tInput words:", str(scan_words))
+    print("Created sample:")
+    print("\tScan time:", str(start_time))
+    print("\tInput words:", str(scan_words))
     #if successful, skip forward to the next set of 4 words
     word_count += 4
 
@@ -357,13 +358,13 @@ class ModifiedResNet(nn.Module):
     - The final pooling layer is a QKV attention instead of an average pool
     """
 
-    def __init__(self, layers, output_dim, heads, input_resolution=224, width=64):
+    def __init__(self, layers, output_dim, heads, input_resolution=224, width=64, num_channels=1):
         super().__init__()
         self.output_dim = output_dim
         self.input_resolution = input_resolution
 
         # the 3-layer stem
-        self.conv1 = nn.Conv3d(1, width // 2, kernel_size=3, stride=2, padding=1, bias=False)
+        self.conv1 = nn.Conv3d(num_channels, width // 2, kernel_size=3, stride=2, padding=1, bias=False)
         self.bn1 = nn.BatchNorm3d(width // 2)
         self.relu1 = nn.ReLU(inplace=True)
         self.conv2 = nn.Conv3d(width // 2, width // 2, kernel_size=2, padding=1, bias=False)
@@ -471,6 +472,7 @@ class CLIP(nn.Module):
                  image_resolution: int,
                  vision_layers: Union[Tuple[int, int, int, int], int],
                  vision_width: int,
+                 num_channels: int,
                  # text
                  context_length: int,
                  vocab_size: int,
@@ -489,7 +491,8 @@ class CLIP(nn.Module):
             output_dim=embed_dim,
             heads=vision_heads,
             input_resolution=image_resolution,
-            width=vision_width
+            width=vision_width,
+            num_channels=num_channels
         )
 
         #initializes text transformer
@@ -702,7 +705,7 @@ def train_clip(model, sample_list, batch_size=10, num_epochs=100, lr=1e-3, debug
             # p = torch.randperm(len(text_samples))
             # epoch_text_samples, epoch_image_samples = (text_samples.cpu())[p].to(device), (image_samples.cpu())[p].to(device)
             p = torch.randperm(len(sample[0]))
-            epoch_text_samples, epoch_image_samples = (sample[0].cpu())[p].to(device), (sample[1].cpu())[p].to(device)    
+            epoch_text_samples, epoch_image_samples = sample[0][p].to(device), sample[1][p].to(device)   
             #print("Shuffled copies")
             for batch in range(math.floor(epoch_image_samples.shape[0]/batch_size)):
                 optimizer.zero_grad()
@@ -770,7 +773,7 @@ def split_subject_samples(subjects_samples, min_val=None, max_val=None, num_toke
         min_val = images.min()
         max_val = images.max()
     images = (images - min_val)/(max_val - min_val)
-    return images.to(device), text.to(device), min_val, max_val
+    return images, text, min_val, max_val
 
 def split_samples(samples, min_val=None, max_val=None, num_tokens=4*num_words):
     images = torch.zeros([len(samples)] + list(samples[0][0].shape))
@@ -782,7 +785,7 @@ def split_samples(samples, min_val=None, max_val=None, num_tokens=4*num_words):
         min_val = images.min()
         max_val = images.max()
     images = (images - min_val)/(max_val - min_val)
-    return images.to(device), text.to(device), min_val, max_val
+    return images, text, min_val, max_val
 
 # def assess_accuracy(model, text_samples, image_samples, batch_size=64):
 def assess_accuracy(model, sample_list, batch_size=32):
@@ -815,7 +818,7 @@ def assess_accuracy(model, sample_list, batch_size=32):
             # logits_per_text = torch.rand((batch_size, batch_size)).to(device)
 
             #symmetric loss function
-            labels = torch.arange(batch_size).to(device)
+            labels = torch.arange(batch_size)
             loss_text = loss_fn(logits_per_text, labels).detach()
             loss_image = loss_fn(logits_per_image, labels).detach()
             loss = (loss_text + loss_image)/2
@@ -859,6 +862,9 @@ for subj_id in range(len(subjects_samples)):
     # del temp_subjects_samples[subj_id]
     # train_samples = temp_subjects_samples
     # train_images, train_text, min_val, max_val = split_subject_samples(train_samples)
+    # for alpha in [1e-5, 5e-5]:
+
+    #     print("Alpha:",alpha)
     train_sample_list = []
     for i in range(len(subjects_samples)):
         first_subj = False
@@ -882,15 +888,14 @@ for subj_id in range(len(subjects_samples)):
     print(test_text.shape)
     print(test_images.shape)
 
-    # for alpha in [1e-4, 1e-5, 1e-6]:
-
-    #     print("Alpha:",alpha)
+    
 
     clip_model = CLIP(
         1024, #embed dim
         image_resolution, 
         (2,2,2,2), #image encoder layers 
-        64, #image encoder width
+        64, #image encoder width,
+        num_words, #number of fmri channels per sample
         4*num_words, #token context length
         vocab_size, 
         transformer_width, 
