@@ -1,5 +1,3 @@
-#This script is designed to run on the Compute Canada remote computers using Python version 3.7.9
-
 import transformers
 from transformers import CLIPConfig, CLIPModel, CLIPProcessor, CLIPImageProcessor, CLIPTokenizerFast
 import torch
@@ -21,17 +19,14 @@ import pandas as pd
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 
-# device = 'cpu'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(device)
 
 NUM_SUBJS = 8
-subjects_fmri = [] #stores all 8 subject fmri np arrays
-fMRI_folder = Path('./doi_10.5061_dryad.gt413__v1')
-assert fMRI_folder.exists(), f"Foldder: {fMRI_folder} does not exist."
-
-with open(fMRI_folder / 'fmri_indices', 'rb') as f:
-    fmri_indices = pickle.load(f)
+NUM_WORDS = 4
+BATCH_SIZE = 32
+LEFT_OUT_SUBJ = 0
+MODEL_PATH = "./saved_clip_model_minus_subj_0_words_4_concat"
 
 class SubjectImageDataset(Dataset):
     def __init__(self, annotations_file, img_dir, num_words):
@@ -48,8 +43,7 @@ class SubjectImageDataset(Dataset):
         for word_count in range(self.num_words):
             word_idx = idx*4 + word_count
             img_path = os.path.join(self.img_dir, self.img_labels.iloc[word_idx, 0])
-            with open(img_path, 'rb') as f:
-                image = torch.load(img_path)
+            image = torch.load(img_path)
             word = self.img_labels.iloc[word_idx, 1]
             if word_count == 0:
                 full_image = torch.unsqueeze(image,0)
@@ -59,17 +53,6 @@ class SubjectImageDataset(Dataset):
                 #full_image += torch.unsqueeze(image,0) #sums up fmri scans from each word
                 full_word += " " + word
         return full_image, full_word
-    
-subject_dataloaders = []
-NUM_WORDS = 4
-BATCH_SIZE = 32
-for i in range(NUM_SUBJS):
-    label_filename = "./" + str(i) + "_subject_word_fmri_labels.csv"
-    dataset = SubjectImageDataset(label_filename, "", NUM_WORDS)
-    train_dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
-    subject_dataloaders.append(train_dataloader)
-
-print("Total number of samples:", len(subject_dataloaders[0].dataset))
 
 import gzip
 import html
@@ -625,100 +608,8 @@ transformer_width = state_dict["ln_final.weight"].shape[0]
 transformer_heads = transformer_width // 64
 transformer_layers = len(set(k.split(".")[2] for k in state_dict if k.startswith("transformer.resblocks")))
 
-def unison_shuffled_copies(a, b):
-    assert len(a) == len(b)
-    p = np.random.permutation(len(a))
-    return a[p], b[p]
-
-#trains the clip model from scratch
-#def train_clip(model, text_samples, image_samples, batch_size=10, num_epochs=100, lr=1e-3, debug=False):
-def train_clip(model, dataloaders, num_epochs=100, lr=1e-3, debug=False):
-    print("Training...")
-    for epoch in range(num_epochs):
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=0.2)
-        loss_fn = nn.CrossEntropyLoss()
-        model.zero_grad(set_to_none=True)
-        epoch_loss = 0
-        image_epoch_correct = 0
-        text_epoch_correct = 0
-        epoch_total = 0
-        for batch in range(math.floor(len(subject_dataloaders[0].dataset)/BATCH_SIZE)):
-            for subject_data in dataloaders:
-                optimizer.zero_grad()
-                images, text = next(iter(subject_data))
-                image_batch = images.to(device)
-                text_tokens = []
-                for text_sample in text:
-                    text_tokens.append(tokenize(text_sample, context_length=NUM_WORDS*4))
-                text_batch = torch.cat(text_tokens, dim=0).long().to(device)
-                
-                logits_per_image, logits_per_text = model(image_batch, text_batch)
-                
-                #symmetric loss function
-                labels = torch.arange(BATCH_SIZE).to(device)
-                loss_text = loss_fn(logits_per_text, labels)
-                loss_image = loss_fn(logits_per_image, labels)
-                loss = (loss_text + loss_image)/2
-                loss.backward()
-                epoch_loss += loss.detach().item()
-                optimizer.step()
-                
-                #compute accuracy
-                image_winners = torch.argmax(logits_per_image, dim=0)
-                text_winners = torch.argmax(logits_per_text, dim=0)
-                image_corrects = (image_winners == labels)
-                text_corrects = (text_winners == labels)
-                total_image_correct = image_corrects.sum().float().item()
-                total_text_correct = text_corrects.sum().float().item()
-                image_epoch_correct += total_image_correct
-                text_epoch_correct += total_text_correct
-                epoch_total += BATCH_SIZE
-                if debug:
-                    print("\t\tBatch:", batch, "/", math.floor(len(subject_dataloaders[0].dataset)/BATCH_SIZE), ", Loss:", loss.item())
-                del logits_per_image
-                del logits_per_text
-                del text_batch
-                del image_batch
-                if device == "cuda":
-                    torch.cuda.empty_cache()
-                gc.collect()
-        if debug:
-            print("\tEpoch:", epoch, "Training Loss:", epoch_loss, "Training Image Accuracy:", image_epoch_correct/epoch_total, "Training Text Accuracy:", text_epoch_correct/epoch_total)
-        if device == "cuda":
-            torch.cuda.empty_cache()
-        gc.collect()
-
-def split_subject_samples(subjects_samples, min_val=None, max_val=None, num_tokens=4*NUM_WORDS):
-    images = torch.zeros([len(subjects_samples[0])] + list(subjects_samples[0][0][0].shape))
-    text = torch.zeros((len(subjects_samples[0]), num_tokens), dtype=int)
-    for idx in range(len(subjects_samples[0])):
-        for subj_id, samples in enumerate(subjects_samples):
-            if subj_id == 0:
-                avg_fmri = samples[idx][0]
-            else:
-                avg_fmri += samples[idx][0]
-        images[idx] = torch.tensor(avg_fmri/len(subjects_samples[0]))
-        text[idx] = tokenize([" ".join(subjects_samples[0][idx][1])], context_length=num_tokens)
-    if min_val is None:
-        min_val = images.min()
-        max_val = images.max()
-    images = (images - min_val)/(max_val - min_val)
-    return images, text, min_val, max_val
-
-def split_samples(samples, min_val=None, max_val=None, num_tokens=4*NUM_WORDS):
-    images = torch.zeros([len(samples)] + list(samples[0][0].shape))
-    text = torch.zeros((len(samples), num_tokens), dtype=int)
-    for idx, sample in enumerate(samples):
-        images[idx] = torch.tensor(sample[0])
-        text[idx] = tokenize([" ".join(sample[1])], context_length=num_tokens)
-    if min_val is None:
-        min_val = images.min()
-        max_val = images.max()
-    images = (images - min_val)/(max_val - min_val)
-    return images, text, min_val, max_val
-
 # def assess_accuracy(model, text_samples, image_samples, batch_size=64):
-def assess_accuracy(model, dataloaders, batch_size=BATCH_SIZE):
+def assess_accuracy(model, dataloaders, batch_size):
     total_samples = 0
     total_image_correct = 0
     total_text_correct = 0
@@ -727,7 +618,7 @@ def assess_accuracy(model, dataloaders, batch_size=BATCH_SIZE):
     loss_fn = nn.CrossEntropyLoss()
 
     for subject_data in dataloaders:
-        for batch in range(math.floor(len(subject_dataloaders[0].dataset)/batch_size)):
+        for batch in range(math.floor(len(dataloaders[0].dataset)/batch_size)):
             images, text = next(iter(subject_data))
             image_batch = images.to(device)
             text_tokens = []
@@ -770,60 +661,79 @@ def assess_accuracy(model, dataloaders, batch_size=BATCH_SIZE):
     gc.collect()
     return total_loss, total_image_correct/total_samples, total_text_correct/total_samples
 
-for subj_id in range(NUM_SUBJS):
-    print("Subject:", subj_id)
-    
+def get_dataloaders(batch_size):
     train_dataloaders = []
     test_dataloader = None
-    for i in range(len(subject_dataloaders)):
-        if i != subj_id:
-            train_dataloaders.append(subject_dataloaders[i])
+    for i in range(NUM_SUBJS):
+        label_filename = "./" + str(i) + "_subject_word_fmri_labels.csv"
+        dataset = SubjectImageDataset(label_filename, "", NUM_WORDS)
+        if i != LEFT_OUT_SUBJ:
+            train_dataloaders.append(DataLoader(dataset, batch_size=batch_size, shuffle=True))
         else:
-            test_dataloader = subject_dataloaders[i]
+            test_dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    return train_dataloaders, test_dataloader
 
-    clip_model = CLIP(
-        1024, #embed dim
-        image_resolution, 
-        (2,2,2,2), #image encoder layers 
-        64, #image encoder width,
-        NUM_WORDS, #number of fmri channels per sample
-        4*NUM_WORDS, #token context length
-        vocab_size, 
-        transformer_width, 
-        transformer_heads, 
-        transformer_layers
-    ).to(device)
+clip_model = CLIP(
+    1024, #embed dim
+    image_resolution, 
+    (2,2,2,2), #image encoder layers 
+    64, #image encoder width,
+    NUM_WORDS, #number of fmri channels per sample
+    4*NUM_WORDS, #token context length
+    vocab_size, 
+    transformer_width, 
+    transformer_heads, 
+    transformer_layers
+).to(device)
+clip_model.load_state_dict(torch.load(MODEL_PATH))
+clip_model.eval()
 
-    train_clip(clip_model, train_dataloaders, lr=1e-5, num_epochs=50, debug=True)
+full_batch_img_train_total = 0
+full_batch_text_train_total = 0
+full_batch_img_test_total = 0
+full_batch_text_test_total = 0
+two_batch_img_train_total = 0
+two_batch_text_train_total = 0
+two_batch_img_test_total = 0
+two_batch_text_test_total = 0
 
-    # train_loss, train_image_acc, train_text_acc = assess_accuracy(clip_model, train_dataloaders)
-    # print(BATCH_SIZE, "Batch Train Loss:", train_loss, ", Image Accuracy:", train_image_acc, ", Text Accuracy:", train_text_acc)
+full_batch_train_dataloaders, full_batch_test_dataloader = get_dataloaders(BATCH_SIZE)
+print("Total number of samples:", len(full_batch_test_dataloader.dataset))
 
-    # test_loss, test_image_acc, test_text_acc = assess_accuracy(clip_model, [test_dataloader])
-    # print(BATCH_SIZE, "Batch Test Loss:", test_loss, ", Image Accuracy:", test_image_acc, ", Text Accuracy:", test_text_acc)
+two_batch_train_dataloaders, two_batch_test_dataloader = get_dataloaders(2)
+print("Total number of samples:", len(two_batch_test_dataloader.dataset))
 
-    # two_batch_train_loaders = []
-    # two_batch_test_loader = None
-    # for i in range(NUM_SUBJS):
-    #     label_filename = "./" + str(i) + "_subject_word_fmri_labels.csv"
-    #     dataset = SubjectImageDataset(label_filename, "", NUM_WORDS)
-    #     two_batch_dataloader = DataLoader(dataset, batch_size=2, shuffle=True)
-    #     if i != subj_id:
-    #         two_batch_train_loaders.append(two_batch_dataloader)
-    #     else:
-    #         two_batch_test_loader = two_batch_dataloader
+for i in range(10):
+    print("Iteration:", i)
 
-    # train_loss, train_image_acc, train_text_acc = assess_accuracy(clip_model, two_batch_train_loaders, batch_size=2)
-    # print("2 Batch Train Loss:", train_loss, ", Image Accuracy:", train_image_acc, ", Text Accuracy:", train_text_acc)
+    train_loss, train_image_acc, train_text_acc = assess_accuracy(clip_model, full_batch_train_dataloaders, BATCH_SIZE)
+    full_batch_img_train_total += train_image_acc
+    full_batch_text_train_total += train_text_acc
+    print("\t", BATCH_SIZE, "Batch Train Loss:", train_loss, ", Image Accuracy:", train_image_acc, ", Text Accuracy:", train_text_acc)
 
-    # test_loss, test_image_acc, test_text_acc = assess_accuracy(clip_model, [two_batch_test_loader], batch_size=2)
-    # print("2 Batch Test Loss:", test_loss, ", Image Accuracy:", test_image_acc, ", Text Accuracy:", test_text_acc)
+    test_loss, test_image_acc, test_text_acc = assess_accuracy(clip_model, [full_batch_test_dataloader], BATCH_SIZE)
+    full_batch_img_test_total += test_image_acc
+    full_batch_text_test_total += test_text_acc
+    print("\t", BATCH_SIZE, "Batch Test Loss:", test_loss, ", Image Accuracy:", test_image_acc, ", Text Accuracy:", test_text_acc)
 
-    torch.save(clip_model.state_dict(), "./saved_clip_model_minus_subj_" + str(subj_id) + "_words_" + str(NUM_WORDS) + "_concat")
+    train_loss, train_image_acc, train_text_acc = assess_accuracy(clip_model, two_batch_train_dataloaders, 2)
+    two_batch_img_train_total += train_image_acc
+    two_batch_text_train_total += train_text_acc
+    print("\t", 2, "Batch Train Loss:", train_loss, ", Image Accuracy:", train_image_acc, ", Text Accuracy:", train_text_acc)
 
-    if device == "cuda":
-        torch.cuda.empty_cache()
-    gc.collect()
+    test_loss, test_image_acc, test_text_acc = assess_accuracy(clip_model, [two_batch_test_dataloader], 2)
+    two_batch_img_test_total += test_image_acc
+    two_batch_text_test_total += test_text_acc
+    print("\t", 2, "Batch Test Loss:", test_loss, ", Image Accuracy:", test_image_acc, ", Text Accuracy:", test_text_acc)
 
-    #break
+print("Average full batch train image accuracy:", full_batch_img_train_total/10)
+print("Average full batch train text accuracy:", full_batch_text_train_total/10)
+print("Average full batch test image accuracy:", full_batch_img_test_total/10)
+print("Average full batch test text accuracy:", full_batch_text_test_total/10)
+print("Average two batch train image accuracy:", two_batch_img_train_total/10)
+print("Average two batch train text accuracy:", two_batch_text_train_total/10)
+print("Average two batch test image accuracy:", two_batch_img_test_total/10)
+print("Average two batch test text accuracy:", two_batch_text_test_total/10)
+
+
 
