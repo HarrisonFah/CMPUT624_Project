@@ -17,9 +17,6 @@ from gensim.models import Word2Vec
 import re
 import gc
 import pickle
-import pandas as pd
-from torch.utils.data import Dataset
-from torch.utils.data import DataLoader
 
 # device = 'cpu'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -28,48 +25,81 @@ print(device)
 NUM_SUBJS = 8
 subjects_fmri = [] #stores all 8 subject fmri np arrays
 fMRI_folder = Path('./doi_10.5061_dryad.gt413__v1')
-assert fMRI_folder.exists(), f"Foldder: {fMRI_folder} does not exist."
 
 with open(fMRI_folder / 'fmri_indices', 'rb') as f:
     fmri_indices = pickle.load(f)
 
-class SubjectImageDataset(Dataset):
-    def __init__(self, annotations_file, img_dir, num_words):
-        self.img_labels = pd.read_csv(annotations_file)
-        self.img_dir = img_dir
-        self.num_words = num_words
+assert fMRI_folder.exists(), f"Foldder: {fMRI_folder} does not exist."
+for subj_id in range(8): 
+    fmri_file_name = str(subj_id) + '_smooth_detrend_nifti_4d.nii'
+    fmri = nib.load(fMRI_folder / fmri_file_name)
+    fmri = np.array(fmri.dataobj)
+    assert isinstance(fmri, np.ndarray), f"Imported fmri_scan for subject {subj_id} is not of type numpy.ndarray"
+    assert(fmri.ndim) == 4, f"Imported fmri_scan for subject {subj_id} is not 4 dimensional"
+    subjects_fmri.append(fmri)
 
-    def __len__(self):
-        return math.floor(len(self.img_labels)/4) - NUM_WORDS//4 + 1
+words_info = [] #stores tuples of (word, time, features) sorted by time appeared
+mat_file = fMRI_folder / 'subject_1.mat' #only looks at the first subject file, somewhere it said all the timings were the same so this should be safe
+mat_contents = sio.loadmat(mat_file)
+for count, row in enumerate(mat_contents['words'][0]):
+    word_value = row[0][0][0][0]
+    time = row[1][0][0]
+    word_tuple = (word_value, time)
+    words_info.append(word_tuple)
 
-    def __getitem__(self, idx):
-        full_image = None
-        full_word = None
-        for word_count in range(self.num_words):
-            word_idx = idx*4 + word_count
-            img_path = os.path.join(self.img_dir, self.img_labels.iloc[word_idx, 0])
-            with open(img_path, 'rb') as f:
-                image = torch.load(img_path)
-            word = self.img_labels.iloc[word_idx, 1]
-            if word_count == 0:
-                full_image = torch.unsqueeze(image,0)
-                full_word = word
+subjects_samples = [[] for i in range(NUM_SUBJS)] #stores lists of all the samples for each subject
+window = signal.windows.gaussian(16, std=1) #gaussian window for the 4 fMRI scans
+num_words = 8
+word_count = 0
+while word_count < len(words_info) - num_words:
+    #gets the 4 input words, and the 4 consecutive words while verifying they were read in sequence
+    scan_words = []
+    start_time = words_info[word_count][1]
+    valid_word = True #tracks if the words are in sequence or not
+    all_weighted_word_scans = []
+    for i in range(num_words):
+        word_info = words_info[word_count + i]
+        if word_info[1] != start_time + 0.5*i:
+            #if some of the words are not in sequence, skip forward 1 word after innter loop
+            valid_word = False
+            break
+        scan_words.append(word_info[0])
+        fmri_count = 0
+        weighted_word_scans = [] #contains weighted word scans for each subject
+        for j in range(1,17):
+            delay = 0.5*j #time after word was read
+            try:
+                curr_fmri_idx = fmri_indices.index((start_time + delay)/2) #checks if an fMRI scan happens at this time point
+                weight = window[int(2*delay)-1]
+                for count, subject in enumerate(subjects_fmri):
+                    if fmri_count == 0:
+                        weighted_word_scans.append(weight*subject[:,:,:,curr_fmri_idx])
+                    else:
+                        weighted_word_scans[count] += weight*subject[:,:,:,curr_fmri_idx]
+                fmri_count += 1
+            except Exception as e:
+                pass
+        if fmri_count != 4:
+            valid_word = False
+            break
+        all_weighted_word_scans.append(weighted_word_scans)
+    if not valid_word:
+        word_count +=1
+        continue
+    for subject_count in range(NUM_SUBJS):
+        for word_scan_count, weighted_scans in enumerate(all_weighted_word_scans):
+            if word_scan_count == 0:
+                summed_weighted_scan = weighted_scans[subject_count]
             else:
-                full_image = torch.cat((full_image, torch.unsqueeze(image,0))) #adds fmri channel for each word
-                #full_image += torch.unsqueeze(image,0) #sums up fmri scans from each word
-                full_word += " " + word
-        return full_image, full_word
-    
-subject_dataloaders = []
-NUM_WORDS = 4
-BATCH_SIZE = 32
-for i in range(NUM_SUBJS):
-    label_filename = "./" + str(i) + "_subject_word_fmri_labels.csv"
-    dataset = SubjectImageDataset(label_filename, "", NUM_WORDS)
-    train_dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
-    subject_dataloaders.append(train_dataloader)
+                summed_weighted_scan += weighted_scans[subject_count]
+        subjects_samples[subject_count].append((summed_weighted_scan, scan_words))
+    print("Created sample:")
+    print("\tScan time:", str(start_time))
+    print("\tInput words:", str(scan_words))
+    #if successful, skip forward to the next set of 4 words
+    word_count += 4
 
-print("Total number of samples:", len(subject_dataloaders[0].dataset))
+print("Total number of samples:", str(len(subjects_samples[0])))
 
 import gzip
 import html
@@ -317,13 +347,13 @@ class ModifiedResNet(nn.Module):
     - The final pooling layer is a QKV attention instead of an average pool
     """
 
-    def __init__(self, layers, output_dim, heads, input_resolution=224, width=64, num_channels=1):
+    def __init__(self, layers, output_dim, heads, input_resolution=224, width=64):
         super().__init__()
         self.output_dim = output_dim
         self.input_resolution = input_resolution
 
         # the 3-layer stem
-        self.conv1 = nn.Conv3d(num_channels, width // 2, kernel_size=3, stride=2, padding=1, bias=False)
+        self.conv1 = nn.Conv3d(1, width // 2, kernel_size=3, stride=2, padding=1, bias=False)
         self.bn1 = nn.BatchNorm3d(width // 2)
         self.relu1 = nn.ReLU(inplace=True)
         self.conv2 = nn.Conv3d(width // 2, width // 2, kernel_size=2, padding=1, bias=False)
@@ -431,7 +461,6 @@ class CLIP(nn.Module):
                  image_resolution: int,
                  vision_layers: Union[Tuple[int, int, int, int], int],
                  vision_width: int,
-                 num_channels: int,
                  # text
                  context_length: int,
                  vocab_size: int,
@@ -450,8 +479,7 @@ class CLIP(nn.Module):
             output_dim=embed_dim,
             heads=vision_heads,
             input_resolution=image_resolution,
-            width=vision_width,
-            num_channels=num_channels
+            width=vision_width
         )
 
         #initializes text transformer
@@ -632,7 +660,7 @@ def unison_shuffled_copies(a, b):
 
 #trains the clip model from scratch
 #def train_clip(model, text_samples, image_samples, batch_size=10, num_epochs=100, lr=1e-3, debug=False):
-def train_clip(model, dataloaders, num_epochs=100, lr=1e-3, debug=False):
+def train_clip(model, sample_list, batch_size=10, num_epochs=100, lr=1e-3, debug=False):
     print("Training...")
     for epoch in range(num_epochs):
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=0.2)
@@ -642,20 +670,46 @@ def train_clip(model, dataloaders, num_epochs=100, lr=1e-3, debug=False):
         image_epoch_correct = 0
         text_epoch_correct = 0
         epoch_total = 0
-        for batch in range(math.floor(len(subject_dataloaders[0].dataset)/BATCH_SIZE)):
-            for subject_data in dataloaders:
+        #print("Shuffling copies")
+        #p = np.random.permutation(len(a))
+        # print("Before memory summary:")
+        # print(torch.cuda.memory_summary(device=None, abbreviated=False))
+        # if device == "cuda":
+        #     print("Emptying cache...")
+        #     torch.cuda.empty_cache()
+        #     gc.collect()
+        # print("Before after summary:")
+        # print(torch.cuda.memory_summary(device=None, abbreviated=False))
+        # for obj in gc.get_objects():
+        #     try:
+        #         if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
+        #             print(type(obj), obj.size())
+        #     except:
+        #         pass
+        # for i in range(10):
+        #     print("i:",i)
+        for sample in sample_list:
+            # p = torch.randperm(len(text_samples))
+            # epoch_text_samples, epoch_image_samples = (text_samples.cpu())[p].to(device), (image_samples.cpu())[p].to(device)
+            p = torch.randperm(len(sample[0]))
+            epoch_text_samples, epoch_image_samples = (sample[0].cpu())[p].to(device), (sample[1].cpu())[p].to(device)    
+            #print("Shuffled copies")
+            for batch in range(math.floor(epoch_image_samples.shape[0]/batch_size)):
                 optimizer.zero_grad()
-                images, text = next(iter(subject_data))
-                image_batch = images.to(device)
-                text_tokens = []
-                for text_sample in text:
-                    text_tokens.append(tokenize(text_sample, context_length=NUM_WORDS*4))
-                text_batch = torch.cat(text_tokens, dim=0).long().to(device)
                 
-                logits_per_image, logits_per_text = model(image_batch, text_batch)
+                #gets embeddings for text and image batches
+                start_idx = batch*batch_size
+                end_idx = (batch+1)*batch_size
+                #print("Indexing samples")
+                text_batch, image_batch = epoch_text_samples[start_idx:end_idx], epoch_image_samples[start_idx:end_idx]
+                #print("Indexed samples")
+                
+                #print("Calling model")
+                logits_per_image, logits_per_text = model(torch.unsqueeze(image_batch, dim=1), text_batch)
+                #print("Called model")
                 
                 #symmetric loss function
-                labels = torch.arange(BATCH_SIZE).to(device)
+                labels = torch.arange(batch_size).to(device)
                 loss_text = loss_fn(logits_per_text, labels)
                 loss_image = loss_fn(logits_per_image, labels)
                 loss = (loss_text + loss_image)/2
@@ -672,9 +726,9 @@ def train_clip(model, dataloaders, num_epochs=100, lr=1e-3, debug=False):
                 total_text_correct = text_corrects.sum().float().item()
                 image_epoch_correct += total_image_correct
                 text_epoch_correct += total_text_correct
-                epoch_total += BATCH_SIZE
+                epoch_total += batch_size
                 if debug:
-                    print("\t\tBatch:", batch, "/", math.floor(len(subject_dataloaders[0].dataset)/BATCH_SIZE), ", Loss:", loss.item())
+                    print("\t\tBatch:", batch, "/", math.floor(epoch_image_samples.shape[0]/batch_size), ", Loss:", loss.item(), ", Image Accuracy:", total_image_correct/batch_size , ", Text Accuracy:", total_text_correct/batch_size)
                 del logits_per_image
                 del logits_per_text
                 del text_batch
@@ -684,11 +738,14 @@ def train_clip(model, dataloaders, num_epochs=100, lr=1e-3, debug=False):
                 gc.collect()
         if debug:
             print("\tEpoch:", epoch, "Training Loss:", epoch_loss, "Training Image Accuracy:", image_epoch_correct/epoch_total, "Training Text Accuracy:", text_epoch_correct/epoch_total)
+        print("Deleting temp text and image samples...")
+        del epoch_text_samples
+        del epoch_image_samples
         if device == "cuda":
             torch.cuda.empty_cache()
         gc.collect()
 
-def split_subject_samples(subjects_samples, min_val=None, max_val=None, num_tokens=4*NUM_WORDS):
+def split_subject_samples(subjects_samples, min_val=None, max_val=None, num_tokens=4*num_words):
     images = torch.zeros([len(subjects_samples[0])] + list(subjects_samples[0][0][0].shape))
     text = torch.zeros((len(subjects_samples[0]), num_tokens), dtype=int)
     for idx in range(len(subjects_samples[0])):
@@ -703,9 +760,9 @@ def split_subject_samples(subjects_samples, min_val=None, max_val=None, num_toke
         min_val = images.min()
         max_val = images.max()
     images = (images - min_val)/(max_val - min_val)
-    return images, text, min_val, max_val
+    return images.to(device), text.to(device), min_val, max_val
 
-def split_samples(samples, min_val=None, max_val=None, num_tokens=4*NUM_WORDS):
+def split_samples(samples, min_val=None, max_val=None, num_tokens=4*num_words):
     images = torch.zeros([len(samples)] + list(samples[0][0].shape))
     text = torch.zeros((len(samples), num_tokens), dtype=int)
     for idx, sample in enumerate(samples):
@@ -715,10 +772,10 @@ def split_samples(samples, min_val=None, max_val=None, num_tokens=4*NUM_WORDS):
         min_val = images.min()
         max_val = images.max()
     images = (images - min_val)/(max_val - min_val)
-    return images, text, min_val, max_val
+    return images.to(device), text.to(device), min_val, max_val
 
 # def assess_accuracy(model, text_samples, image_samples, batch_size=64):
-def assess_accuracy(model, dataloaders, batch_size=BATCH_SIZE):
+def assess_accuracy(model, sample_list, batch_size=32):
     total_samples = 0
     total_image_correct = 0
     total_text_correct = 0
@@ -726,16 +783,23 @@ def assess_accuracy(model, dataloaders, batch_size=BATCH_SIZE):
 
     loss_fn = nn.CrossEntropyLoss()
 
-    for subject_data in dataloaders:
-        for batch in range(math.floor(len(subject_dataloaders[0].dataset)/batch_size)):
-            images, text = next(iter(subject_data))
-            image_batch = images.to(device)
-            text_tokens = []
-            for text_sample in text:
-                text_tokens.append(tokenize(text_sample, context_length=NUM_WORDS*4))
-            text_batch = torch.cat(text_tokens, dim=0).long().to(device)
+    #text_samples, image_samples = unison_shuffled_copies(text, images)
+    print(len(sample_list))
+    for sample in sample_list:
+        print(len(sample[0]))
+        p = torch.randperm(len(sample[0]))
+        temp_text_samples, temp_image_samples = sample[0][p], sample[1][p]
 
-            logits_per_image, logits_per_text = model(image_batch, text_batch)
+        for batch in range(math.floor(temp_image_samples.shape[0]/batch_size)):
+
+            #print("batch:",batch)
+                    
+            #gets embeddings for text and image batches
+            start_idx = batch*batch_size
+            end_idx = (batch+1)*batch_size
+            text_batch, image_batch = temp_text_samples[start_idx:end_idx], temp_image_samples[start_idx:end_idx]
+
+            logits_per_image, logits_per_text = model(torch.unsqueeze(image_batch, dim=1), text_batch)
             #gets random results
             # logits_per_image = torch.rand((batch_size, batch_size)).to(device)
             # logits_per_text = torch.rand((batch_size, batch_size)).to(device)
@@ -765,65 +829,75 @@ def assess_accuracy(model, dataloaders, batch_size=BATCH_SIZE):
             if device == "cuda":
                 torch.cuda.empty_cache()
             gc.collect()
+    del temp_text_samples
+    del temp_image_samples
     if device == "cuda":
         torch.cuda.empty_cache()
     gc.collect()
     return total_loss, total_image_correct/total_samples, total_text_correct/total_samples
 
-for subj_id in range(NUM_SUBJS):
+for subj_id in range(len(subjects_samples)):
     print("Subject:", subj_id)
-    
-    train_dataloaders = []
-    test_dataloader = None
-    for i in range(len(subject_dataloaders)):
+    flattened = []
+    for i in range(len(subjects_samples)): #use first 3 subjects for training
         if i != subj_id:
-            train_dataloaders.append(subject_dataloaders[i])
+            flattened += subjects_samples[i]
+
+    #use all subjects except one for training
+    train_sample_list = []
+    for i in range(len(subjects_samples)):
+        first_subj = False
+        if i == subj_id:
+            continue
+        if not first_subj:
+            first_subj = True
+            train_images, train_text, min_val, max_val = split_samples(subjects_samples[i])
         else:
-            test_dataloader = subject_dataloaders[i]
+            train_images, train_text, _, _ = split_samples(subjects_samples[i], min_val, max_val)
+        train_sample_list.append((train_text, train_images))
+
+    #use last subject for testing
+    test_samples = subjects_samples[subj_id]
+    test_images, test_text, _, _ = split_samples(test_samples, min_val, max_val)
+    # print("Test:")
+    # print(test_text.shape)
+    # print(test_images.shape)
 
     clip_model = CLIP(
         1024, #embed dim
         image_resolution, 
         (2,2,2,2), #image encoder layers 
-        64, #image encoder width,
-        NUM_WORDS, #number of fmri channels per sample
-        4*NUM_WORDS, #token context length
+        64, #image encoder width
+        4*num_words, #token context length
         vocab_size, 
         transformer_width, 
         transformer_heads, 
         transformer_layers
     ).to(device)
 
-    train_clip(clip_model, train_dataloaders, lr=1e-5, num_epochs=50, debug=True)
+    train_clip(clip_model, train_sample_list, batch_size=32, lr=1e-5, num_epochs=50, debug=True)
 
-    # train_loss, train_image_acc, train_text_acc = assess_accuracy(clip_model, train_dataloaders)
-    # print(BATCH_SIZE, "Batch Train Loss:", train_loss, ", Image Accuracy:", train_image_acc, ", Text Accuracy:", train_text_acc)
+    # train_loss, train_image_acc, train_text_acc = assess_accuracy(clip_model, train_sample_list, batch_size=32)
+    # print("32 Batch Train Loss:", train_loss, ", Image Accuracy:", train_image_acc, ", Text Accuracy:", train_text_acc)
 
-    # test_loss, test_image_acc, test_text_acc = assess_accuracy(clip_model, [test_dataloader])
-    # print(BATCH_SIZE, "Batch Test Loss:", test_loss, ", Image Accuracy:", test_image_acc, ", Text Accuracy:", test_text_acc)
-
-    # two_batch_train_loaders = []
-    # two_batch_test_loader = None
-    # for i in range(NUM_SUBJS):
-    #     label_filename = "./" + str(i) + "_subject_word_fmri_labels.csv"
-    #     dataset = SubjectImageDataset(label_filename, "", NUM_WORDS)
-    #     two_batch_dataloader = DataLoader(dataset, batch_size=2, shuffle=True)
-    #     if i != subj_id:
-    #         two_batch_train_loaders.append(two_batch_dataloader)
-    #     else:
-    #         two_batch_test_loader = two_batch_dataloader
-
-    # train_loss, train_image_acc, train_text_acc = assess_accuracy(clip_model, two_batch_train_loaders, batch_size=2)
+    # train_loss, train_image_acc, train_text_acc = assess_accuracy(clip_model, train_sample_list, batch_size=2)
     # print("2 Batch Train Loss:", train_loss, ", Image Accuracy:", train_image_acc, ", Text Accuracy:", train_text_acc)
 
-    # test_loss, test_image_acc, test_text_acc = assess_accuracy(clip_model, [two_batch_test_loader], batch_size=2)
+    # test_loss, test_image_acc, test_text_acc = assess_accuracy(clip_model, [(test_text, test_images)], batch_size=32)
+    # print("32 Batch Test Loss:", test_loss, ", Image Accuracy:", test_image_acc, ", Text Accuracy:", test_text_acc)
+
+    # test_loss, test_image_acc, test_text_acc = assess_accuracy(clip_model, [(test_text, test_images)], batch_size=2)
     # print("2 Batch Test Loss:", test_loss, ", Image Accuracy:", test_image_acc, ", Text Accuracy:", test_text_acc)
 
-    torch.save(clip_model.state_dict(), "./saved_clip_model_minus_subj_" + str(subj_id) + "_words_" + str(NUM_WORDS) + "_concat")
+    torch.save(clip_model.state_dict(), "./saved_clip_model_minus_subj_" + str(subj_id) + "_words_" + str(num_words) + "_overlap")
+    print("Saved file: ./saved_clip_model_minus_subj_" + str(subj_id) + "_words_" + str(num_words) + "_overlap")
 
+    del train_images
+    del train_text
+    del test_images
+    del test_text
     if device == "cuda":
         torch.cuda.empty_cache()
     gc.collect()
 
     #break
-
