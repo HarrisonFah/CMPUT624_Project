@@ -651,9 +651,12 @@ image_resolution = output_width * 32
 embed_dim = state_dict["text_projection"].shape[1]
 context_length = state_dict["positional_embedding"].shape[0]
 vocab_size = state_dict["token_embedding.weight"].shape[0]
+print("vocab_size:", vocab_size)
 transformer_width = state_dict["ln_final.weight"].shape[0]
+print("transformer_width:", transformer_width)
 transformer_heads = transformer_width // 64
 transformer_layers = len(set(k.split(".")[2] for k in state_dict if k.startswith("transformer.resblocks")))
+print("transformer_layers:", transformer_layers)
 
 def unison_shuffled_copies(a, b):
     assert len(a) == len(b)
