@@ -51,7 +51,7 @@ for count, row in enumerate(mat_contents['words'][0]):
 
 subjects_samples = [[] for i in range(NUM_SUBJS)] #stores lists of all the samples for each subject
 window = signal.windows.gaussian(16, std=1) #gaussian window for the 4 fMRI scans
-num_words = 8
+num_words = 4
 word_count = 0
 while word_count < len(words_info) - num_words:
     #gets the 4 input words, and the 4 consecutive words while verifying they were read in sequence
@@ -880,7 +880,7 @@ for subj_id in range(len(subjects_samples)):
         transformer_layers
     ).to(device)
 
-    train_clip(clip_model, train_sample_list, batch_size=32, lr=1e-5, num_epochs=0, debug=True)
+    train_clip(clip_model, train_sample_list, batch_size=32, lr=1e-5, num_epochs=10, debug=True)
 
     NUM_TSNE_SAMPLES_EACH = 10
     clip_model.eval()
