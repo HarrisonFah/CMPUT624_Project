@@ -18,7 +18,9 @@ import re
 import gc
 import pickle
 from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
+
 
 # device = 'cpu'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -880,7 +882,7 @@ for subj_id in range(len(subjects_samples)):
         transformer_layers
     ).to(device)
 
-    train_clip(clip_model, train_sample_list, batch_size=32, lr=1e-5, num_epochs=0, debug=True)
+    train_clip(clip_model, train_sample_list, batch_size=32, lr=1e-5, num_epochs=10, debug=True)
 
     #NUM_TSNE_SAMPLES_EACH = 250
     TSNE_SAMPLES = [0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
@@ -897,8 +899,10 @@ for subj_id in range(len(subjects_samples)):
             input_samples[subj_idx*NUM_TSNE_SAMPLES_EACH*2 + count*2] = proj_image
             proj_text = clip_model.encode_text(torch.unsqueeze(text, 0))[0]
             input_samples[subj_idx*NUM_TSNE_SAMPLES_EACH*2 + count*2 + 1] = proj_text
-    tsne = TSNE(n_components=2, verbose=1)
-    tsne_samples = tsne.fit_transform(torch.tensor(input_samples))
+    #tsne = TSNE(n_components=2, verbose=1)
+    pca = PCA(n_components=2)
+    tsne_samples = pca.fit_transform(torch.tensor(input_samples))
+    print(tsne_samples)
     subj_count = 0
     for subj in range(NUM_SUBJS):
         if subj == subj_id:
@@ -917,7 +921,7 @@ for subj_id in range(len(subjects_samples)):
     fig1.savefig("tsne_training.png")
     plt.show()
 
-    tsne = TSNE(n_components=2, verbose=1, perplexity=5)
+    #tsne = TSNE(n_components=2, verbose=1, perplexity=5)
     test_input_samples = torch.zeros((NUM_TSNE_SAMPLES_EACH*2, 1024))
     for idx in TSNE_SAMPLES:
         image = test_images[idx]
@@ -926,7 +930,7 @@ for subj_id in range(len(subjects_samples)):
         test_input_samples[count*2] = proj_image
         proj_text = clip_model.encode_text(torch.unsqueeze(text, 0))[0]
         test_input_samples[count*2 + 1] = proj_text
-    test_tsne_samples = tsne.fit_transform(torch.tensor(test_input_samples))
+    test_tsne_samples = pca.fit_transform(torch.tensor(test_input_samples))
     for i in range(NUM_TSNE_SAMPLES_EACH):
         plt.plot(test_tsne_samples[i*2: i*2 + 2, 0], test_tsne_samples[i*2: i*2 + 2, 1], colors[subj_count] + "-", label="Subject" + str(subj))
         plt.scatter(test_tsne_samples[i*2, 0], test_tsne_samples[i*2, 1], marker='o', color=colors[subj_count], zorder=2)
@@ -939,9 +943,9 @@ for subj_id in range(len(subjects_samples)):
     fig2.savefig("tsne_testing.png")
     plt.show()
 
-    tsne = TSNE(n_components=2, verbose=1)
+    #tsne = TSNE(n_components=2, verbose=1)
     all_samples = torch.cat((input_samples, test_input_samples))
-    all_tsne_samples = tsne.fit_transform(all_samples.detach().numpy())
+    all_tsne_samples = pca.fit_transform(all_samples.detach().numpy())
     subj_count = 0
     for subj in range(NUM_SUBJS):
         if subj == subj_id:
