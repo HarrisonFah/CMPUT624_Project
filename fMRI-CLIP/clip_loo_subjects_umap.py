@@ -17,6 +17,10 @@ from gensim.models import Word2Vec
 import re
 import gc
 import pickle
+import matplotlib.pyplot as plt
+import umap
+from sklearn.preprocessing import StandardScaler
+
 
 # device = 'cpu'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -47,12 +51,10 @@ for count, row in enumerate(mat_contents['words'][0]):
     word_tuple = (word_value, time)
     words_info.append(word_tuple)
 
-subjects_samples = [[[] for j in range(4)] for i in range(NUM_SUBJS)] #stores lists of all the samples for each subject and for each of the 4 runs
+subjects_samples = [[] for i in range(NUM_SUBJS)] #stores lists of all the samples for each subject
 window = signal.windows.gaussian(16, std=1) #gaussian window for the 4 fMRI scans
-num_words = 8
+num_words = 4
 word_count = 0
-new_run = True
-run_count = 0
 while word_count < len(words_info) - num_words:
     #gets the 4 input words, and the 4 consecutive words while verifying they were read in sequence
     scan_words = []
@@ -82,10 +84,6 @@ while word_count < len(words_info) - num_words:
             except Exception as e:
                 pass
         if fmri_count != 4:
-            if new_run == True:
-                print("Run ended:", start_time)
-                new_run = False
-                run_count += 1
             valid_word = False
             break
         all_weighted_word_scans.append(weighted_word_scans)
@@ -98,17 +96,14 @@ while word_count < len(words_info) - num_words:
                 summed_weighted_scan = weighted_scans[subject_count]
             else:
                 summed_weighted_scan += weighted_scans[subject_count]
-        subjects_samples[subject_count][run_count].append((summed_weighted_scan, scan_words))
-    new_run = True
-    # print("Created sample:")
-    # print("\tScan time:", str(start_time))
-    # print("\tInput words:", str(scan_words))
+        subjects_samples[subject_count].append((summed_weighted_scan, scan_words))
+    print("Created sample:")
+    print("\tScan time:", str(start_time))
+    print("\tInput words:", str(scan_words))
     #if successful, skip forward to the next set of 4 words
     word_count += 4
 
-print("Run_count:", run_count)
-
-print("Total number of samples:", str(len(subjects_samples[0][0]) + len(subjects_samples[0][1]) + len(subjects_samples[0][2]) + len(subjects_samples[0][3])))
+print("Total number of samples:", str(len(subjects_samples[0])))
 
 import gzip
 import html
@@ -658,9 +653,12 @@ image_resolution = output_width * 32
 embed_dim = state_dict["text_projection"].shape[1]
 context_length = state_dict["positional_embedding"].shape[0]
 vocab_size = state_dict["token_embedding.weight"].shape[0]
+print("vocab_size:", vocab_size)
 transformer_width = state_dict["ln_final.weight"].shape[0]
+print("transformer_width:", transformer_width)
 transformer_heads = transformer_width // 64
 transformer_layers = len(set(k.split(".")[2] for k in state_dict if k.startswith("transformer.resblocks")))
+print("transformer_layers:", transformer_layers)
 
 def unison_shuffled_copies(a, b):
     assert len(a) == len(b)
@@ -669,7 +667,7 @@ def unison_shuffled_copies(a, b):
 
 #trains the clip model from scratch
 #def train_clip(model, text_samples, image_samples, batch_size=10, num_epochs=100, lr=1e-3, debug=False):
-def train_clip(model, images, text, batch_size=10, num_epochs=100, lr=1e-3, debug=False):
+def train_clip(model, sample_list, batch_size=10, num_epochs=100, lr=1e-3, debug=False):
     print("Training...")
     for epoch in range(num_epochs):
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=0.2)
@@ -679,51 +677,72 @@ def train_clip(model, images, text, batch_size=10, num_epochs=100, lr=1e-3, debu
         image_epoch_correct = 0
         text_epoch_correct = 0
         epoch_total = 0
-        p = torch.randperm(len(images))
-        epoch_text_samples, epoch_image_samples = (text.cpu())[p].to(device), (images.cpu())[p].to(device)    
-        #print("Shuffled copies")
-        for batch in range(math.floor(epoch_image_samples.shape[0]/batch_size)):
-            optimizer.zero_grad()
-            
-            #gets embeddings for text and image batches
-            start_idx = batch*batch_size
-            end_idx = (batch+1)*batch_size
-            #print("Indexing samples")
-            text_batch, image_batch = epoch_text_samples[start_idx:end_idx], epoch_image_samples[start_idx:end_idx]
-            #print("Indexed samples")
-            
-            #print("Calling model")
-            logits_per_image, logits_per_text = model(torch.unsqueeze(image_batch, dim=1), text_batch)
-            #print("Called model")
-            
-            #symmetric loss function
-            labels = torch.arange(batch_size).to(device)
-            loss_text = loss_fn(logits_per_text, labels)
-            loss_image = loss_fn(logits_per_image, labels)
-            loss = (loss_text + loss_image)/2
-            loss.backward()
-            epoch_loss += loss.detach().item()
-            optimizer.step()
-            
-            #compute accuracy
-            image_winners = torch.argmax(logits_per_image, dim=0)
-            text_winners = torch.argmax(logits_per_text, dim=0)
-            image_corrects = (image_winners == labels)
-            text_corrects = (text_winners == labels)
-            total_image_correct = image_corrects.sum().float().item()
-            total_text_correct = text_corrects.sum().float().item()
-            image_epoch_correct += total_image_correct
-            text_epoch_correct += total_text_correct
-            epoch_total += batch_size
-            if debug:
-                print("\t\tBatch:", batch, "/", math.floor(epoch_image_samples.shape[0]/batch_size), ", Loss:", loss.item(), ", Image Accuracy:", total_image_correct/batch_size , ", Text Accuracy:", total_text_correct/batch_size)
-            del logits_per_image
-            del logits_per_text
-            del text_batch
-            del image_batch
-            if device == "cuda":
-                torch.cuda.empty_cache()
-            gc.collect()
+        #print("Shuffling copies")
+        #p = np.random.permutation(len(a))
+        # print("Before memory summary:")
+        # print(torch.cuda.memory_summary(device=None, abbreviated=False))
+        # if device == "cuda":
+        #     print("Emptying cache...")
+        #     torch.cuda.empty_cache()
+        #     gc.collect()
+        # print("Before after summary:")
+        # print(torch.cuda.memory_summary(device=None, abbreviated=False))
+        # for obj in gc.get_objects():
+        #     try:
+        #         if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
+        #             print(type(obj), obj.size())
+        #     except:
+        #         pass
+        # for i in range(10):
+        #     print("i:",i)
+        for sample in sample_list:
+            # p = torch.randperm(len(text_samples))
+            # epoch_text_samples, epoch_image_samples = (text_samples.cpu())[p].to(device), (image_samples.cpu())[p].to(device)
+            p = torch.randperm(len(sample[0]))
+            epoch_text_samples, epoch_image_samples = (sample[0].cpu())[p].to(device), (sample[1].cpu())[p].to(device)    
+            #print("Shuffled copies")
+            for batch in range(math.floor(epoch_image_samples.shape[0]/batch_size)):
+                optimizer.zero_grad()
+                
+                #gets embeddings for text and image batches
+                start_idx = batch*batch_size
+                end_idx = (batch+1)*batch_size
+                #print("Indexing samples")
+                text_batch, image_batch = epoch_text_samples[start_idx:end_idx], epoch_image_samples[start_idx:end_idx]
+                #print("Indexed samples")
+                
+                #print("Calling model")
+                logits_per_image, logits_per_text = model(torch.unsqueeze(image_batch, dim=1), text_batch)
+                #print("Called model")
+                
+                #symmetric loss function
+                labels = torch.arange(batch_size).to(device)
+                loss_text = loss_fn(logits_per_text, labels)
+                loss_image = loss_fn(logits_per_image, labels)
+                loss = (loss_text + loss_image)/2
+                loss.backward()
+                epoch_loss += loss.detach().item()
+                optimizer.step()
+                
+                #compute accuracy
+                image_winners = torch.argmax(logits_per_image, dim=0)
+                text_winners = torch.argmax(logits_per_text, dim=0)
+                image_corrects = (image_winners == labels)
+                text_corrects = (text_winners == labels)
+                total_image_correct = image_corrects.sum().float().item()
+                total_text_correct = text_corrects.sum().float().item()
+                image_epoch_correct += total_image_correct
+                text_epoch_correct += total_text_correct
+                epoch_total += batch_size
+                if debug:
+                    print("\t\tBatch:", batch, "/", math.floor(epoch_image_samples.shape[0]/batch_size), ", Loss:", loss.item(), ", Image Accuracy:", total_image_correct/batch_size , ", Text Accuracy:", total_text_correct/batch_size)
+                del logits_per_image
+                del logits_per_text
+                del text_batch
+                del image_batch
+                if device == "cuda":
+                    torch.cuda.empty_cache()
+                gc.collect()
         if debug:
             print("\tEpoch:", epoch, "Training Loss:", epoch_loss, "Training Image Accuracy:", image_epoch_correct/epoch_total, "Training Text Accuracy:", text_epoch_correct/epoch_total)
         print("Deleting temp text and image samples...")
@@ -826,44 +845,138 @@ def assess_accuracy(model, sample_list, batch_size=32):
 
 for subj_id in range(len(subjects_samples)):
     print("Subject:", subj_id)
-    for run in range(4):
-        print("Run:", run)
-        train_samples = [] #gets 3 runs besides current left out one
-        test_samples = None
-        for i in range(len(subjects_samples[0])): #use first 3 subjects for training
-            if i != run:
-                train_samples += subjects_samples[subj_id][i]
-            else:
-                test_samples = subjects_samples[subj_id][i]
-        print("Training samples length:", len(train_samples))
-        print("Testing samples length:", len(test_samples))
-        #use all subjects except one for training
-        train_images, train_text, min_val, max_val = split_samples(train_samples)
-        test_images, test_text, _, _ = split_samples(test_samples, min_val, max_val)
+    flattened = []
+    for i in range(len(subjects_samples)): #use first 3 subjects for training
+        if i != subj_id:
+            flattened += subjects_samples[i]
 
-        clip_model = CLIP(
-            1024, #embed dim
-            image_resolution, 
-            (2,2,2,2), #image encoder layers 
-            64, #image encoder width
-            4*num_words, #token context length
-            vocab_size, 
-            transformer_width, 
-            transformer_heads, 
-            transformer_layers
-        ).to(device)
+    #use all subjects except one for training
+    train_sample_list = []
+    for i in range(len(subjects_samples)):
+        first_subj = False
+        if i == subj_id:
+            continue
+        if not first_subj:
+            first_subj = True
+            train_images, train_text, min_val, max_val = split_samples(subjects_samples[i])
+        else:
+            train_images, train_text, _, _ = split_samples(subjects_samples[i], min_val, max_val)
+        train_sample_list.append((train_text, train_images))
 
-        train_clip(clip_model, train_images, train_text, batch_size=32, lr=1e-5, num_epochs=50, debug=True)
+    #use last subject for testing
+    test_samples = subjects_samples[subj_id]
+    test_images, test_text, _, _ = split_samples(test_samples, min_val, max_val)
 
-        torch.save(clip_model.state_dict(), "./saved_clip_model_subj_" + str(subj_id) + "minus_" + str(run) + "_words_" + str(num_words) + "_overlap")
-        print("Saved file: ./saved_clip_model_subj_" + str(subj_id) + "minus_" + str(run) + "_words_" + str(num_words) + "_overlap")
+    clip_model = CLIP(
+        1024, #embed dim
+        image_resolution, 
+        (2,2,2,2), #image encoder layers 
+        64, #image encoder width
+        4*num_words, #token context length
+        vocab_size, 
+        transformer_width, 
+        transformer_heads, 
+        transformer_layers
+    ).to(device)
 
-        del train_images
-        del train_text
-        del test_images
-        del test_text
-        if device == "cuda":
-            torch.cuda.empty_cache()
-        gc.collect()
+    train_clip(clip_model, train_sample_list, batch_size=32, lr=1e-5, num_epochs=0, debug=True)
 
-        #break
+    UMAP_SAMPLES = [0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
+    NUM_UMAP_SAMPLES_EACH = len(UMAP_SAMPLES)
+    clip_model.eval()
+    colors = ['C0', 'C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7']
+
+    input_samples = torch.zeros(((NUM_SUBJS-1)*NUM_UMAP_SAMPLES_EACH*2, 1024))
+    for subj_idx, subj_list in enumerate(train_sample_list):
+        for count, idx in enumerate(UMAP_SAMPLES):
+            image = subj_list[1][idx]
+            text = subj_list[0][idx]
+            proj_image = clip_model.encode_image(torch.unsqueeze(torch.unsqueeze(image, 0), 0))[0]
+            input_samples[subj_idx*NUM_UMAP_SAMPLES_EACH*2 + count*2] = proj_image
+            proj_text = clip_model.encode_text(torch.unsqueeze(text, 0))[0]
+            input_samples[subj_idx*NUM_UMAP_SAMPLES_EACH*2 + count*2 + 1] = proj_text
+            if count == 5:
+                print(subj_idx)
+                print(proj_image)
+                print(proj_text)
+    reducer = umap.UMAP()
+    scaled_samples = StandardScaler().fit_transform(input_samples.detach().numpy())
+    umap_samples = reducer.fit_transform(scaled_samples)
+    subj_count = 0
+    for subj in range(NUM_SUBJS):
+        if subj == subj_id:
+            continue
+        for i in range(NUM_UMAP_SAMPLES_EACH):
+            start_idx = subj_count*NUM_UMAP_SAMPLES_EACH*2 + i*2
+            plt.plot(umap_samples[start_idx: start_idx + 2, 0], umap_samples[start_idx: start_idx + 2, 1], colors[subj] + "-", label="Subject" + str(subj))
+            plt.scatter(umap_samples[start_idx, 0], umap_samples[start_idx, 1], marker='o', color=colors[subj], zorder=2)
+            plt.scatter(umap_samples[start_idx+1, 0], umap_samples[start_idx+1, 1], marker='x', color=colors[subj], zorder=2)
+        subj_count += 1
+    plt.title("2D Visualization of CLIP fMRI/Text Embeddings Across Training Subjects")
+    handles, labels = plt.gca().get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    plt.legend(by_label.values(), by_label.keys())
+    fig1 = plt.gcf()
+    fig1.savefig("umap_training.png")
+    plt.show()
+
+    test_input_samples = torch.zeros((NUM_UMAP_SAMPLES_EACH*2, 1024))
+    for idx in UMAP_SAMPLES:
+        image = test_images[idx]
+        text = test_text[idx]
+        proj_image = clip_model.encode_image(torch.unsqueeze(torch.unsqueeze(image, 0), 0))[0]
+        test_input_samples[count*2] = proj_image
+        proj_text = clip_model.encode_text(torch.unsqueeze(text, 0))[0]
+        test_input_samples[count*2 + 1] = proj_text
+
+    test_scaled_samples = StandardScaler().fit_transform(test_input_samples.detach().numpy())
+    test_umap_samples = reducer.fit_transform(test_scaled_samples)
+    print("subj_id: ")
+    print(subj_id)
+    for i in range(NUM_UMAP_SAMPLES_EACH):
+        plt.plot(test_umap_samples[i*2: i*2 + 2, 0], test_umap_samples[i*2: i*2 + 2, 1], colors[subj_id] + "-", label="Subject 0")
+        plt.scatter(test_umap_samples[i*2, 0], test_umap_samples[i*2, 1], marker='o', color=colors[subj_id], zorder=2)
+        plt.scatter(test_umap_samples[i*2+1, 0], test_umap_samples[i*2+1, 1], marker='x', color=colors[subj_id], zorder=2)
+    plt.title("2D Visualization of CLIP fMRI/Text Embeddings Across Testing Subjects")
+    handles, labels = plt.gca().get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    plt.legend(by_label.values(), by_label.keys())
+    fig2 = plt.gcf()
+    fig2.savefig("umap_testing.png")
+    plt.show()
+
+    all_samples = torch.cat((input_samples, test_input_samples))
+    all_scaled_samples = StandardScaler().fit_transform(all_samples.detach().numpy())
+    all_umap_samples = reducer.fit_transform(all_scaled_samples)
+    subj_count = 0
+    for subj in range(NUM_SUBJS):
+        if subj == subj_id:
+            continue
+        for i in range(NUM_UMAP_SAMPLES_EACH):
+            start_idx = subj_count*NUM_UMAP_SAMPLES_EACH*2 + i*2
+            plt.plot(all_umap_samples[start_idx: start_idx + 2, 0], all_umap_samples[start_idx: start_idx + 2, 1], colors[subj] + "-", label="Subject" + str(subj))
+            plt.scatter(all_umap_samples[start_idx, 0], all_umap_samples[start_idx, 1], marker='o', color=colors[subj], zorder=2)
+            plt.scatter(all_umap_samples[start_idx+1, 0], all_umap_samples[start_idx+1, 1], marker='x', color=colors[subj], zorder=2)
+        subj_count += 1
+    for i in range(NUM_UMAP_SAMPLES_EACH):
+        start_idx = subj_count*NUM_UMAP_SAMPLES_EACH*2 + i*2
+        plt.plot(all_umap_samples[start_idx: start_idx + 2, 0], all_umap_samples[start_idx: start_idx + 2, 1], colors[subj_id] + "-", label="Subject" + str(subj_id))
+        plt.scatter(all_umap_samples[start_idx, 0], all_umap_samples[start_idx, 1], marker='o', color=colors[subj_id], zorder=2)
+        plt.scatter(all_umap_samples[start_idx+1, 0], all_umap_samples[start_idx+1, 1], marker='x', color=colors[subj_id], zorder=2)
+    plt.title("2D Visualization of CLIP fMRI/Text Embeddings Across All Subjects")
+    handles, labels = plt.gca().get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    plt.legend(by_label.values(), by_label.keys())
+    fig3 = plt.gcf()
+    fig3.savefig("umap_all.png")
+    plt.show()
+
+    del train_images
+    del train_text
+    del test_images
+    del test_text
+    if device == "cuda":
+        torch.cuda.empty_cache()
+    gc.collect()
+
+    break
