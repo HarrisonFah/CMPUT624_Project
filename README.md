@@ -7,7 +7,7 @@ https://openaipublic.azureedge.net/clip/models/afeb0e10f9e5a86da6080e35cf09123ac
 
 3. To preprocess the fMRIs, run preprocessing2.ipynb in Jupyter Notebook and run all cells up to and including the 2nd cell under the smoothing header
 
-4. To reproduce results of the three experiments, edit NUM_WORDS and OVERLAPPING in each of the files fMRI-CLIP/clip_loo_runs_no_dataloader.py, fMRI-CLIP/clip_loo_subjects_no_dataloader.py, and fMRI-CLIP/clip_loo_runs_subjects_no_dataloader.py and run them from the main directory
+4. To reproduce results of the three experiments, first make sure all packages/modules are install, then optionally edit NUM_WORDS and OVERLAPPING in each of the files fMRI-CLIP/clip_loo_runs_no_dataloader.py, fMRI-CLIP/clip_loo_subjects_no_dataloader.py, and fMRI-CLIP/clip_loo_runs_subjects_no_dataloader.py and run them from the main directory
 
 5. To reproduce line plot figures, edit values in fMRI-CLIP/line_plots.py and run it
 
