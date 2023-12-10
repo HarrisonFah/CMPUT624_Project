@@ -30,12 +30,12 @@ NUM_SUBJS = 8
 subjects_fmri = [] #stores all 8 subject fmri np arrays
 fMRI_folder = Path('./doi_10_5061_dryad_gt413__v20150225')
 
-with open(fMRI_folder / 'fmri_indices', 'rb') as f:
+with open('./fmri_indices', 'rb') as f:
     fmri_indices = pickle.load(f)
 
 assert fMRI_folder.exists(), f"Foldder: {fMRI_folder} does not exist."
 for subj_id in range(8): 
-    fmri_file_name = str(subj_id) + '_smooth_detrend_nifti_4d.nii'
+    fmri_file_name = str(subj_id) + '_smooth_nifti_4d.nii'
     fmri = nib.load(fMRI_folder / fmri_file_name)
     fmri = np.array(fmri.dataobj)
     assert isinstance(fmri, np.ndarray), f"Imported fmri_scan for subject {subj_id} is not of type numpy.ndarray"

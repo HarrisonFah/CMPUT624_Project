@@ -30,7 +30,7 @@ subjects_fmri = [] #stores all 8 subject fmri np arrays
 fMRI_folder = Path('./doi_10_5061_dryad_gt413__v20150225')
 assert fMRI_folder.exists(), f"Foldder: {fMRI_folder} does not exist."
 
-with open(fMRI_folder / 'fmri_indices', 'rb') as f:
+with open('./fmri_indices', 'rb') as f:
     fmri_indices = pickle.load(f)
 
 class SubjectImageDataset(Dataset):
