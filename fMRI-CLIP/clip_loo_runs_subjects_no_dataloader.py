@@ -26,7 +26,7 @@ NUM_WORDS = 20
 OVERLAPPING = True
 NUM_SUBJS = 8
 subjects_fmri = [] #stores all 8 subject fmri np arrays
-fMRI_folder = Path('./doi_10.5061_dryad.gt413__v1')
+fMRI_folder = Path('./doi_10_5061_dryad_gt413__v20150225')
 
 with open(fMRI_folder / 'fmri_indices', 'rb') as f:
     fmri_indices = pickle.load(f)

@@ -1,6 +1,6 @@
 To run fMRI-CLIP code:
 
-1. Download the data (original) from the following link and put the unzipped folder doi_10.5061_dryad.gt413__v1 in the main directory: https://www.cs.cmu.edu/afs/cs/project/theo-73/www/plosone/
+1. Download the data (original) from the following link and put the unzipped folder doi_10_5061_dryad_gt413__v20150225 in the main directory: https://www.cs.cmu.edu/afs/cs/project/theo-73/www/plosone/
 
 2. Download ResNet model from the following link and put it in in the main directory:
 https://openaipublic.azureedge.net/clip/models/afeb0e10f9e5a86da6080e35cf09123aca3b358a0c3e3b6c78a7b63bc04b6762/RN50.pt
